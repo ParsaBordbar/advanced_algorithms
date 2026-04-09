@@ -1,0 +1,776 @@
+<directory_structure>
+bin/
+  benchmark.rs
+solver/
+  mod.rs
+  phase1.rs
+  simulated_annealing.rs
+.DS_Store
+lib.rs
+main.rs
+models.rs
+parser.rs
+rng.rs
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="bin/benchmark.rs">
+use std::fs::{self, File};
+use std::io::Write;
+use std::time::Instant;
+
+use sop_simulated_annealing::parser::parse_instance;
+use sop_simulated_annealing::solver::phase1::phase1_construction;
+use sop_simulated_annealing::solver::simulated_annealing::simulated_annealing;
+use sop_simulated_annealing::rng::EpochRng;
+
+// A struct to hold our results in memory so we can sort them later
+struct BenchmarkResult {
+    instance: String,
+    best_profit: f64,
+    best_cost: f64,
+    avg_time_ms: u128,
+}
+
+fn main() {
+    let instances_dir = "src/instances";
+    let output_file = "benchmark_results.csv";
+    
+    // Read and collect paths
+    let paths = fs::read_dir(instances_dir).expect("Failed to read directory");
+    let mut files: Vec<_> = paths.filter_map(Result::ok).collect();
+    
+    // Sort files alphabetically so they are processed in a consistent order
+    files.sort_by_key(|dir| dir.path());
+
+    let t_start = 1000.0;
+    let t_final = 0.1;
+    let alpha = 0.999;
+    let epoch_length = 1000;
+    let num_runs = 3; // Number of times to run each instance
+
+    let mut all_results: Vec<BenchmarkResult> = Vec::new();
+
+    for entry in files {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("sop") {
+            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+            println!("Processing {} ({} runs)...", filename, num_runs);
+
+            let problem = parse_instance(path.to_str().unwrap());
+            
+            let mut best_profit = -1.0;
+            let mut best_cost = f64::MAX;
+            let mut total_time = 0;
+
+            // Run the solver 3 times
+            for _ in 0..num_runs {
+                let start = Instant::now();
+                
+                let initial_sol = phase1_construction(&problem);
+                let mut rng = EpochRng::new();
+                
+                let sol = simulated_annealing(
+                    &problem, 
+                    initial_sol, 
+                    t_start, 
+                    t_final, 
+                    alpha, 
+                    epoch_length,
+                    &mut rng 
+                );
+                
+                total_time += start.elapsed().as_millis();
+
+                // Keep the best solution (Highest profit, tie-breaker: lowest cost)
+                if sol.total_profit > best_profit || (sol.total_profit == best_profit && sol.total_cost < best_cost) {
+                    best_profit = sol.total_profit;
+                    best_cost = sol.total_cost;
+                }
+            }
+
+            all_results.push(BenchmarkResult {
+                instance: filename,
+                best_profit,
+                best_cost,
+                avg_time_ms: total_time / (num_runs as u128),
+            });
+        }
+    }
+
+    // SORTING THE RESULTS: 
+    // Here we sort descending by Profit. 
+    // If you want to sort alphabetically by instance name, change to:
+    // all_results.sort_by(|a, b| a.instance.cmp(&b.instance));
+
+        all_results.sort_by_key(|res| {
+        // Extract "27" from "instance_27.sop"
+        res.instance
+            .strip_prefix("instance_")
+            .and_then(|s| s.strip_suffix(".sop"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(usize::MAX) // Fallback if parsing fails
+    });
+    // Write sorted results to CSV
+    let mut csv = File::create(output_file).expect("Failed to create CSV");
+    writeln!(csv, "Instance,Best_Profit,Best_Cost,Avg_Time_ms").unwrap();
+    
+    for res in &all_results {
+        writeln!(
+            csv, 
+            "{},{},{},{}", 
+            res.instance, 
+            res.best_profit, 
+            res.best_cost, 
+            res.avg_time_ms
+        ).unwrap();
+    }
+    
+    println!("Benchmarking complete! {} instances evaluated and saved to {}", all_results.len(), output_file);
+}
+</file>
+
+<file path="lib.rs">
+pub mod models;
+pub mod parser;
+pub mod rng;
+pub mod solver;
+</file>
+
+<file path="main.rs">
+use std::env;
+use std::time::Instant;
+
+use sop_simulated_annealing::parser::parse_instance;
+use sop_simulated_annealing::solver::phase1::phase1_construction;
+use sop_simulated_annealing::solver::simulated_annealing::simulated_annealing;
+use sop_simulated_annealing::rng::EpochRng; 
+use sop_simulated_annealing::models::Solution; // Added to create an empty solution
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 4 {
+        eprintln!("Usage: {} <instance_path> <epoch_length> <alpha> [--skip-phase1]", args[0]);
+        std::process::exit(1);
+    }
+
+    let file_path = &args[1];
+    let epoch_length: usize = args[2].parse().expect("Invalid epoch_length");
+    let alpha: f64 = args[3].parse().expect("Invalid alpha (should be a float like 0.95)");
+    
+    // Check if the skip flag is present in the arguments
+    let skip_phase1 = args.contains(&"--skip-phase1".to_string());
+
+    let t_start = 1000.0;
+    let t_final = 0.1;
+
+    let start_time = Instant::now();
+
+    println!("Parsing instance: {}", file_path);
+    let pb = parse_instance(file_path);
+
+    let initial_sol = if skip_phase1 {
+        println!("Skipping Phase 1. Starting from empty solution...");
+        let mut sol = Solution::new();
+        sol.update_nodes_greedy(&pb);
+        sol.recompute(&pb);
+        sol
+    } else {
+        println!("Starting Phase 1 (Constructive Heuristic)...");
+        let sol = phase1_construction(&pb);
+        println!("Phase 1 Complete -> Profit: {}, Cost: {}", sol.total_profit, sol.total_cost);
+        sol
+    };
+
+    println!("Starting Phase 2 (Simulated Annealing)...");
+    
+    let mut rng = EpochRng::new();
+
+    let best_sol = simulated_annealing(
+        &pb, 
+        initial_sol, 
+        t_start, 
+        t_final, 
+        alpha, 
+        epoch_length, 
+        &mut rng
+    );
+
+    let duration = start_time.elapsed();
+
+    println!("\n=== FINAL RESULTS ===");
+    println!("Execution Time: {:.2?}", duration);
+    println!("Best Profit: {}", best_sol.total_profit);
+    println!("Best Cost: {}", best_sol.total_cost);
+    println!("Clusters Visited: {:?}", best_sol.tour_clusters);
+}
+</file>
+
+<file path="models.rs">
+// In src/models.rs
+
+#[derive(Clone)]
+pub struct Problem {
+    pub num_nodes: usize,
+    pub num_clusters: usize,
+    pub t_max: f64,
+    pub dist: Vec<f64>, 
+    pub cluster_of_node: Vec<usize>,
+    pub nodes_of_cluster: Vec<Vec<usize>>,
+    pub profits: Vec<f64>,
+}
+
+impl Problem {
+    #[inline(always)]
+    pub fn get_dist(&self, i: usize, j: usize) -> f64 {
+        self.dist[i * self.num_nodes + j]
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Solution {
+    pub tour_nodes: Vec<usize>,       
+    pub tour_clusters: Vec<usize>,    
+    pub total_profit: f64,
+    pub total_cost: f64,
+}
+
+impl Solution {
+    pub fn new() -> Self {
+        Self {
+            tour_nodes: vec![0, 0],
+            tour_clusters: vec![0, 0],
+            total_profit: 0.0,
+            total_cost: 0.0,
+        }
+    }
+
+    pub fn update_nodes_greedy(&mut self, pb: &Problem) {
+        let mut new_nodes = Vec::with_capacity(self.tour_clusters.len());
+        new_nodes.push(0); // Start at depot (node 0)
+
+        for i in 1..(self.tour_clusters.len() - 1) {
+            let prev_node = new_nodes[i - 1];
+            let current_cluster = self.tour_clusters[i];
+            
+            let mut best_node = 0;
+            let mut min_dist = f64::MAX;
+            
+            // Find the closest node in the current cluster to the previous node
+            for &node in &pb.nodes_of_cluster[current_cluster] {
+                let dist = pb.get_dist(prev_node, node);
+                if dist < min_dist {
+                    min_dist = dist;
+                    best_node = node;
+                }
+            }
+            new_nodes.push(best_node);
+        }
+        
+        new_nodes.push(0); // End at depot (node 0)
+        self.tour_nodes = new_nodes;
+    }
+
+    pub fn recompute(&mut self, pb: &Problem) {
+        self.total_cost = 0.0;
+        self.total_profit = 0.0;
+        for i in 0..(self.tour_nodes.len() - 1) {
+            self.total_cost += pb.get_dist(self.tour_nodes[i], self.tour_nodes[i + 1]);
+        }
+        for &c in self.tour_clusters.iter().take(self.tour_clusters.len() - 1) {
+            if c != 0 {
+                self.total_profit += pb.profits[c];
+            }
+        }
+    }
+}
+</file>
+
+<file path="parser.rs">
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use crate::models::Problem;
+
+pub fn parse_instance(file_path: &str) -> Problem {
+    let file = File::open(file_path).expect("Could not open file");
+    let reader = BufReader::new(file);
+
+    let mut num_nodes = 0;
+    let mut num_clusters = 0;
+    let mut t_max = 0.0;
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    
+    let mut reading_nodes = false;
+    let mut reading_sets = false;
+
+    let mut profits = Vec::new();
+    let mut nodes_of_cluster = Vec::new();
+    let mut cluster_of_node = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.expect("Error reading line");
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() { continue; }
+
+        if parts[0] == "DIMENSION:" {
+            num_nodes = parts[1].parse().unwrap();
+            cluster_of_node = vec![0; num_nodes];
+        } else if parts[0] == "SETS:" {
+            num_clusters = parts[1].parse().unwrap();
+            profits = vec![0.0; num_clusters];
+            nodes_of_cluster = vec![Vec::new(); num_clusters];
+        } else if parts[0] == "TMAX:" {
+            t_max = parts[1].parse().unwrap();
+        } else if parts[0] == "NODE_COORD_SECTION" {
+            reading_nodes = true;
+            reading_sets = false;
+        } else if parts[0] == "GTSP_SET_SECTION:" {
+            reading_nodes = false;
+            reading_sets = true;
+        } else if parts[0] == "EOF" {
+            break;
+        } else if reading_nodes {
+            let x: f64 = parts[1].parse().unwrap();
+            let y: f64 = parts[2].parse().unwrap();
+            coords.push((x, y));
+        } else if reading_sets {
+            let set_id: usize = parts[0].parse().unwrap();
+            let profit: f64 = parts[1].parse().unwrap();
+            profits[set_id] = profit;
+
+            for i in 2..parts.len() {
+                let node_id: usize = parts[i].parse().unwrap();
+                let internal_node_id = node_id - 1; // Convert 1-indexed to 0-indexed
+                nodes_of_cluster[set_id].push(internal_node_id);
+                cluster_of_node[internal_node_id] = set_id;
+            }
+        }
+    }
+
+    // Precompute 2D Euclidean rounded UP (CEIL_2D from the instance specs)
+    let mut dist = vec![0.0; num_nodes * num_nodes];
+    for i in 0..num_nodes {
+        for j in 0..num_nodes {
+            if i != j {
+                let dx = coords[i].0 - coords[j].0;
+                let dy = coords[i].1 - coords[j].1;
+                dist[i * num_nodes + j] = (dx * dx + dy * dy).sqrt().ceil();
+            }
+        }
+    }
+
+    Problem {
+        num_nodes,
+        num_clusters,
+        t_max,
+        dist,
+        cluster_of_node,
+        nodes_of_cluster,
+        profits,
+    }
+}
+</file>
+
+<file path="rng.rs">
+#![allow(dead_code)]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct EpochRng {
+    state: u64,
+}
+
+impl EpochRng {
+    pub fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX epoch")
+            .as_nanos() as u64;
+        Self { state: seed }
+    }
+    #[inline(always)]
+    pub fn from_seed(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    #[inline(always)]
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    #[inline(always)]
+    pub fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    #[inline(always)]
+    pub fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / 9007199254740992.0)
+    }
+
+    #[inline(always)]
+    pub fn gen_range(&mut self, low: f64, high: f64) -> f64 {
+        assert!(low < high, "low must be less than high");
+        low + (high - low) * self.next_f64()
+    }
+
+    #[inline(always)]
+    pub fn gen_range_i32(&mut self, low: i32, high: i32) -> i32 {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u32() % (high - low) as u32) as i32
+    }
+
+    #[inline(always)]
+    pub fn gen_range_usize(&mut self, low: usize, high: usize) -> usize {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u64() as usize % (high - low))
+    }
+
+    #[inline(always)]
+    pub fn shuffle<T>(&mut self, slice: &mut [T]) {
+        for i in (1..slice.len()).rev() {
+            let j = self.gen_range_usize(0, i + 1);
+            slice.swap(i, j);
+        }
+    }
+}
+
+impl Default for EpochRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
+pub struct LcgRng {
+    state: u64,
+    a: u64,
+    b: u64,
+    m: u64,
+}
+
+
+impl LcgRng {
+
+    #[inline(always)]
+    pub fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX epoch")
+            .as_nanos() as u64;
+        Self::from_seed(seed)
+    }
+
+    #[inline(always)]
+    pub fn from_seed(seed: u64) -> Self {
+        Self {
+            state: seed,
+            a: 1103515245,
+            b: 12345,
+            m: 1u64 << 32,
+        }
+    }
+
+    #[inline(always)]
+    pub fn with_params(seed: u64, a: u64, b: u64, m: u64) -> Self {
+        Self { state: seed, a, b, m }
+    }
+
+    #[inline(always)]
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = (self.a.wrapping_mul(self.state).wrapping_add(self.b)) % self.m;
+        self.state
+    }
+
+    #[inline(always)]
+    pub fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
+
+    #[inline(always)]
+    pub fn next_f64(&mut self) -> f64 {
+        self.next_u64() as f64 / self.m as f64
+    }
+
+    #[inline(always)]
+    pub fn gen_range(&mut self, low: f64, high: f64) -> f64 {
+        assert!(low < high, "low must be less than high");
+        low + (high - low) * self.next_f64()
+    }
+
+    #[inline(always)]
+    pub fn gen_range_i32(&mut self, low: i32, high: i32) -> i32 {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u32() % (high - low) as u32) as i32
+    }
+
+    #[inline(always)]
+    pub fn gen_range_usize(&mut self, low: usize, high: usize) -> usize {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u64() as usize % (high - low))
+    }
+}
+
+impl Default for LcgRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct XorShift {
+    pub state: u64,
+}
+
+impl XorShift {
+    #[inline(always)]
+    pub fn new(seed: u64) -> Self {
+        Self { state: if seed == 0 { 1 } else { seed } }
+    }
+
+    #[inline(always)]
+    pub fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    #[inline(always)]
+    pub fn rand_tenure(&mut self, max_val: u64) -> usize {
+        if max_val == 0 { return 1; }
+        (1 + (self.next() % max_val)) as usize
+    }
+}
+</file>
+
+<file path="solver/mod.rs">
+pub mod phase1;
+pub mod simulated_annealing;
+</file>
+
+<file path="solver/phase1.rs">
+use crate::models::{Problem, Solution};
+
+
+pub fn phase1_construction(pb: &Problem) -> Solution {
+    let mut sol = Solution::new();
+    let mut unvisited_clusters: Vec<usize> = (1..pb.num_clusters).collect();
+    
+    // Sort clusters by descending profit
+    unvisited_clusters.sort_unstable_by(|&a, &b| pb.profits[b].partial_cmp(&pb.profits[a]).unwrap());
+
+    for &cg in &unvisited_clusters {
+        let u = sol.tour_nodes[sol.tour_nodes.len() - 2];
+        let mut best_v = None;
+        let mut min_cost_add = f64::MAX;
+
+        for &v in &pb.nodes_of_cluster[cg] {
+            let cost_add = pb.get_dist(u, v) + pb.get_dist(v, 0) - pb.get_dist(u, 0);
+            if sol.total_cost + cost_add <= pb.t_max {
+                if cost_add < min_cost_add {
+                    min_cost_add = cost_add;
+                    best_v = Some(v);
+                }
+            }
+        }
+
+        if let Some(v) = best_v {
+            sol.tour_nodes.insert(sol.tour_nodes.len() - 1, v);
+            sol.tour_clusters.insert(sol.tour_clusters.len() - 1, cg);
+            sol.total_cost += min_cost_add;
+            sol.total_profit += pb.profits[cg];
+        }
+    }
+
+    tour_improvement(pb, &mut sol);
+    sol
+}
+
+// 4. TOUR IMPROVEMENT (Step 1 & Step 2)
+pub fn tour_improvement(pb: &Problem, sol: &mut Solution) {
+    let mut improved = true;
+    while improved {
+        improved = false;
+        let cost_before = sol.total_cost;
+        
+        optimize_vertices_dp(pb, sol);
+        optimize_routing_2opt(pb, sol);
+
+        if sol.total_cost < cost_before - 1e-5 {
+            improved = true;
+        }
+    }
+}
+
+pub fn optimize_vertices_dp(pb: &Problem, sol: &mut Solution) {
+    let n_clusters = sol.tour_clusters.len();
+    if n_clusters <= 2 { return; }
+
+    let mut dp = vec![vec![f64::MAX; pb.num_nodes]; n_clusters];
+    let mut parent = vec![vec![0usize; pb.num_nodes]; n_clusters];
+
+    dp[0][0] = 0.0;
+
+    for i in 1..n_clusters {
+        let prev_cluster = sol.tour_clusters[i - 1];
+        let curr_cluster = sol.tour_clusters[i];
+
+        for &u in &pb.nodes_of_cluster[prev_cluster] {
+            if dp[i - 1][u] == f64::MAX { continue; }
+
+            for &v in &pb.nodes_of_cluster[curr_cluster] {
+                let cost = dp[i - 1][u] + pb.get_dist(u, v);
+                if cost < dp[i][v] {
+                    dp[i][v] = cost;
+                    parent[i][v] = u;
+                }
+            }
+        }
+    }
+
+    let mut curr_node = 0;
+    for i in (1..n_clusters).rev() {
+        sol.tour_nodes[i] = curr_node;
+        curr_node = parent[i][curr_node];
+    }
+    sol.tour_nodes[0] = 0;
+    sol.recompute(pb);
+}
+
+pub fn optimize_routing_2opt(pb: &Problem, sol: &mut Solution) {
+    let mut improved = true;
+    let n = sol.tour_nodes.len();
+    while improved {
+        improved = false;
+        for i in 1..n - 2 {
+            for j in i + 1..n - 1 {
+                let n1 = sol.tour_nodes[i - 1];
+                let n2 = sol.tour_nodes[i];
+                let n3 = sol.tour_nodes[j];
+                let n4 = sol.tour_nodes[j + 1];
+
+                let current_dist = pb.get_dist(n1, n2) + pb.get_dist(n3, n4);
+                let new_dist = pb.get_dist(n1, n3) + pb.get_dist(n2, n4);
+
+                if new_dist < current_dist - 1e-5 {
+                    sol.tour_nodes[i..=j].reverse();
+                    sol.tour_clusters[i..=j].reverse();
+                    sol.recompute(pb);
+                    improved = true;
+                }
+            }
+        }
+    }
+}
+</file>
+
+<file path="solver/simulated_annealing.rs">
+use crate::models::{Problem, Solution};
+use crate::rng::EpochRng;
+
+#[inline(always)]
+fn evaluate(sol: &Solution, problem: &Problem) -> f64 {
+    let penalty_factor = 10.0;
+    let cost_violation = if sol.total_cost > problem.t_max {
+        sol.total_cost - problem.t_max
+    } else {
+        0.0
+    };
+    sol.total_profit as f64 - (penalty_factor * cost_violation)
+}
+
+/// Simulated Annealing algorithm
+pub fn simulated_annealing(
+    problem: &Problem,
+    mut current_sol: Solution,
+    t_start: f64,
+    t_final: f64,
+    alpha: f64,
+    epoch_length: usize,
+    rng: &mut EpochRng,
+) -> Solution {
+    // Safety check to prevent infinite loops!
+    let safe_alpha = if alpha >= 1.0 { 0.95 } else { alpha };
+
+    let mut best_sol = current_sol.clone();
+    let mut current_eval = evaluate(&current_sol, problem);
+    let mut best_eval = current_eval;
+
+    let mut temp = t_start;
+
+    // Outer loop: Cooling schedule
+    while temp > t_final {
+        for _ in 0..epoch_length {
+            let is_insert = rng.next_u64() % 2 == 0;
+            let mut neighbor_sol = current_sol.clone();
+
+            let moved = if is_insert {
+                // Random Insert
+                if neighbor_sol.tour_clusters.len() <= problem.num_clusters {
+                    // Fix: Generate customer clusters only (1 to num_clusters - 2)
+                    let c = (rng.next_u64() as usize % (problem.num_clusters - 2)) + 1;
+                    
+                    // We can insert anywhere except index 0 (must stay start node) and the very end
+                    let max_pos = std::cmp::max(1, neighbor_sol.tour_clusters.len() - 1);
+                    let pos = (rng.next_u64() as usize % max_pos) + 1; 
+
+                    if !neighbor_sol.tour_clusters.contains(&c) {
+                        neighbor_sol.tour_clusters.insert(pos, c);
+                        true
+                    } else { false }
+                } else { false }
+            } else {
+                // Random Swap
+                if neighbor_sol.tour_clusters.len() > 2 {
+                    // Only swap internal nodes (avoid index 0 and the last index)
+                    let pos = (rng.next_u64() as usize % (neighbor_sol.tour_clusters.len() - 2)) + 1;
+                    
+                    // Fix: Generate customer clusters only (1 to num_clusters - 2)
+                    let c = (rng.next_u64() as usize % (problem.num_clusters - 2)) + 1;
+                    
+                    if !neighbor_sol.tour_clusters.contains(&c) {
+                        neighbor_sol.tour_clusters[pos] = c;
+                        true
+                    } else { false }
+                } else { false }
+            };
+
+            if !moved {
+                continue; 
+            }
+
+            neighbor_sol.update_nodes_greedy(problem);
+
+            neighbor_sol.recompute(problem);
+            let neighbor_eval = evaluate(&neighbor_sol, problem);
+
+            let delta = neighbor_eval - current_eval;
+
+            let accept = if delta > 0.0 {
+                true
+            } else {
+                let prob = 1.0 / (1.0 + f64::exp(-delta / temp));
+                rng.next_f64() < prob
+            };
+
+            if accept {
+                current_sol = neighbor_sol;
+                current_eval = neighbor_eval;
+
+                if current_eval > best_eval && current_sol.total_cost <= problem.t_max {
+                    best_sol = current_sol.clone();
+                    best_eval = current_eval;
+                }
+            }
+        }
+
+        temp *= safe_alpha;
+    }
+
+    best_sol
+}
+</file>
+
+</files>
