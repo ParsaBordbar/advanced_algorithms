@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::time::Instant;
 
-use sop_simulated_annealing::parser::parse_instance;
+use sop_simulated_annealing::io::parser::parse_instance;
 use sop_simulated_annealing::solver::phase1::phase1_construction;
 use sop_simulated_annealing::solver::simulated_annealing::simulated_annealing;
 use sop_simulated_annealing::rng::EpochRng;

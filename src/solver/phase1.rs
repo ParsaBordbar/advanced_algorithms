@@ -35,7 +35,6 @@ pub fn phase1_construction(pb: &Problem) -> Solution {
     sol
 }
 
-// 4. TOUR IMPROVEMENT (Step 1 & Step 2)
 pub fn tour_improvement(pb: &Problem, sol: &mut Solution) {
     let mut improved = true;
     while improved {
