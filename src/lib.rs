@@ -3,3 +3,4 @@ pub mod rng;
 pub mod solver;
 pub mod feasibility;
 pub mod io;
+pub mod configs;
