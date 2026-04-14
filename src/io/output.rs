@@ -11,7 +11,7 @@ pub fn write_solution_file(instance_path: &str, sol: &Solution) -> std::io::Resu
         .to_string_lossy()
         .to_string();
 
-    let out_path = PathBuf::from(format!("{}_output.txt", stem));
+    let out_path = PathBuf::from(format!("src/data/output/{}_output.txt", stem));
     let mut f = File::create(&out_path)?;
 
     let customers: Vec<String> = sol.tour_nodes[1..sol.tour_nodes.len() - 1]
