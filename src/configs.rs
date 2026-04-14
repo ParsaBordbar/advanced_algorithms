@@ -9,10 +9,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            t_start: 1000.0,
+            t_start: 16.0,
             t_final: 0.001,
-            alpha: 0.999997,
-            epoch_length: 5000,
+            alpha: 0.93,
+            epoch_length: 80_000,
         }
     }
 }
