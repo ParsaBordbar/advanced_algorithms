@@ -6,10 +6,10 @@ use sop_simulated_annealing::io::parser::parse_instance;
 use sop_simulated_annealing::rng::EpochRng;
 use sop_simulated_annealing::solver::phase1::phase1_construction;
 use sop_simulated_annealing::solver::simulated_annealing::{
-    simulated_annealing, RunStats, StopCriteria,
+    RunStats, StopCriteria, simulated_annealing,
 };
 // use sop_simulated_annealing::solver::init::random_feasible_initial_solution; // uncomment to use random init sol
-use sop_simulated_annealing::configs::Config;
+use sop_simulated_annealing::configs::{Config, DataPath};
 
 // A struct to hold our results in memory so we can sort them later
 struct BenchmarkResult {
@@ -20,8 +20,13 @@ struct BenchmarkResult {
 }
 
 fn main() {
-    let instances_dir = "src/data/instances";
-    let output_file = "benchmark_results.csv";
+    DataPath {
+        data_dir,
+        output_dir,
+    } = DataPath.default();
+
+    let instances_dir = format!("{}/instances", data_dir);
+    let output_file = format!("{}{}/benchmark_results.csv", data_dir, output_dir);
 
     let paths = fs::read_dir(instances_dir).expect("Failed to read directory");
     let mut files: Vec<_> = paths.filter_map(Result::ok).collect();
@@ -61,7 +66,10 @@ fn main() {
                 let initial_sol = phase1_construction(&problem);
                 // let initial_sol = random_feasible_initial_solution(&problem,  &mut rng);
 
-                let stop = StopCriteria { max_time_secs, max_evals };
+                let stop = StopCriteria {
+                    max_time_secs,
+                    max_evals,
+                };
                 let mut stats = RunStats { eval_count: 0 };
 
                 let sol = simulated_annealing(

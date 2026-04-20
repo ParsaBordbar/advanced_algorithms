@@ -1,6 +1,6 @@
+use crate::models::Problem;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use crate::models::Problem;
 
 pub fn parse_instance(file_path: &str) -> Problem {
     let file = File::open(file_path).expect("Could not open file");
@@ -10,7 +10,7 @@ pub fn parse_instance(file_path: &str) -> Problem {
     let mut num_clusters = 0;
     let mut t_max = 0.0;
     let mut coords: Vec<(f64, f64)> = Vec::new();
-    
+
     let mut reading_nodes = false;
     let mut reading_sets = false;
 
@@ -21,7 +21,9 @@ pub fn parse_instance(file_path: &str) -> Problem {
     for line in reader.lines() {
         let line = line.expect("Error reading line");
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() { continue; }
+        if parts.is_empty() {
+            continue;
+        }
 
         if parts[0] == "DIMENSION:" {
             num_nodes = parts[1].parse().unwrap();

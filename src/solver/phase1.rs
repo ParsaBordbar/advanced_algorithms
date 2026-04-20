@@ -1,12 +1,12 @@
 use crate::models::{Problem, Solution};
 
-
 pub fn phase1_construction(pb: &Problem) -> Solution {
     let mut sol = Solution::new();
     let mut unvisited_clusters: Vec<usize> = (1..pb.num_clusters).collect();
-    
+
     // Sort clusters by descending profit
-    unvisited_clusters.sort_unstable_by(|&a, &b| pb.profits[b].partial_cmp(&pb.profits[a]).unwrap());
+    unvisited_clusters
+        .sort_unstable_by(|&a, &b| pb.profits[b].partial_cmp(&pb.profits[a]).unwrap());
 
     for &cg in &unvisited_clusters {
         let u = sol.tour_nodes[sol.tour_nodes.len() - 2];
@@ -40,7 +40,7 @@ pub fn tour_improvement(pb: &Problem, sol: &mut Solution) {
     while improved {
         improved = false;
         let cost_before = sol.total_cost;
-        
+
         optimize_vertices_dp(pb, sol);
         optimize_routing_2opt(pb, sol);
 
@@ -52,7 +52,9 @@ pub fn tour_improvement(pb: &Problem, sol: &mut Solution) {
 
 pub fn optimize_vertices_dp(pb: &Problem, sol: &mut Solution) {
     let n_clusters = sol.tour_clusters.len();
-    if n_clusters <= 2 { return; }
+    if n_clusters <= 2 {
+        return;
+    }
 
     let mut dp = vec![vec![f64::MAX; pb.num_nodes]; n_clusters];
     let mut parent = vec![vec![0usize; pb.num_nodes]; n_clusters];
@@ -64,7 +66,9 @@ pub fn optimize_vertices_dp(pb: &Problem, sol: &mut Solution) {
         let curr_cluster = sol.tour_clusters[i];
 
         for &u in &pb.nodes_of_cluster[prev_cluster] {
-            if dp[i - 1][u] == f64::MAX { continue; }
+            if dp[i - 1][u] == f64::MAX {
+                continue;
+            }
 
             for &v in &pb.nodes_of_cluster[curr_cluster] {
                 let cost = dp[i - 1][u] + pb.get_dist(u, v);

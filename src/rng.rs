@@ -20,7 +20,10 @@ impl EpochRng {
 
     #[inline(always)]
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.state
     }
 
@@ -67,7 +70,6 @@ impl Default for EpochRng {
     }
 }
 
-
 pub struct LcgRng {
     state: u64,
     a: u64,
@@ -75,9 +77,7 @@ pub struct LcgRng {
     m: u64,
 }
 
-
 impl LcgRng {
-
     #[inline(always)]
     pub fn new() -> Self {
         let seed = SystemTime::now()
@@ -99,7 +99,12 @@ impl LcgRng {
 
     #[inline(always)]
     pub fn with_params(seed: u64, a: u64, b: u64, m: u64) -> Self {
-        Self { state: seed, a, b, m }
+        Self {
+            state: seed,
+            a,
+            b,
+            m,
+        }
     }
 
     #[inline(always)]
@@ -150,7 +155,9 @@ pub struct XorShift {
 impl XorShift {
     #[inline(always)]
     pub fn new(seed: u64) -> Self {
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     #[inline(always)]
@@ -163,7 +170,9 @@ impl XorShift {
 
     #[inline(always)]
     pub fn rand_tenure(&mut self, max_val: u64) -> usize {
-        if max_val == 0 { return 1; }
+        if max_val == 0 {
+            return 1;
+        }
         (1 + (self.next() % max_val)) as usize
     }
 }

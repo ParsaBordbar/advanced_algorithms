@@ -2,10 +2,11 @@ use std::time::Instant;
 
 use crate::models::{Problem, Solution};
 use crate::rng::EpochRng;
+use crate::solver::phase1::tour_improvement;
 
 pub struct StopCriteria {
-    pub max_time_secs: u64, // 0 => unlimited
-    pub max_evals: u64,     // 0 => unlimited
+    pub max_time_secs: u64,
+    pub max_evals: u64,
 }
 
 pub struct RunStats {
@@ -13,17 +14,10 @@ pub struct RunStats {
 }
 
 #[inline(always)]
-fn evaluate(sol: &Solution, problem: &Problem, stats: &mut RunStats) -> f64 {
-    stats.eval_count += 1;
-
-    let penalty_factor = 10.0;
-    let cost_violation = if sol.total_cost > problem.t_max {
-        sol.total_cost - problem.t_max
-    } else {
-        0.0
-    };
-
-    sol.total_profit - (penalty_factor * cost_violation)
+fn evaluate_raw(profit: f64, cost: f64, t_max: f64) -> f64 {
+    let penalty_factor = 100.0;
+    let cost_violation = if cost > t_max { cost - t_max } else { 0.0 };
+    profit - (penalty_factor * cost_violation)
 }
 
 #[inline(always)]
@@ -45,13 +39,22 @@ pub fn simulated_annealing(
     stats: &mut RunStats,
 ) -> Solution {
     let run_start = Instant::now();
+    let safe_alpha = if alpha <= 0.0 || alpha >= 1.0 {
+        0.93
+    } else {
+        alpha
+    };
+    let safe_epoch = if epoch_length == 0 {
+        80_000
+    } else {
+        epoch_length
+    };
 
-    // protect from infinite loop
-    let safe_alpha = if alpha >= 1.0 { 0.95 } else { alpha };
+    // Initial polish to start from a good local optimum
+    tour_improvement(problem, &mut current_sol);
 
     let mut best_sol = current_sol.clone();
-    let mut current_eval = evaluate(&current_sol, problem, stats);
-    let mut best_eval = current_eval;
+    let mut best_eval = evaluate_raw(best_sol.total_profit, best_sol.total_cost, problem.t_max);
 
     let mut temp = t_start;
 
@@ -60,85 +63,228 @@ pub fn simulated_annealing(
             break;
         }
 
-        for _ in 0..epoch_length {
+        for _ in 0..safe_epoch {
             if should_stop(run_start, stop, stats) {
                 break;
             }
+            stats.eval_count += 1;
 
-            let is_insert = rng.next_u64() % 2 == 0;
-            let mut neighbor_sol = current_sol.clone();
-
-            let moved = if is_insert {
-                // Random Insert
-                if neighbor_sol.tour_clusters.len() <= problem.num_clusters {
-                    // valid customer cluster range: [1, num_clusters-1]
-                    if problem.num_clusters <= 1 {
-                        false
-                    } else {
-                        let c = (rng.next_u64() as usize % (problem.num_clusters - 1)) + 1;
-
-                        // insert position in internal segment [1 .. len-1]
-                        let max_pos = std::cmp::max(1, neighbor_sol.tour_clusters.len() - 1);
-                        let pos = (rng.next_u64() as usize % max_pos) + 1;
-
-                        if !neighbor_sol.tour_clusters.contains(&c) {
-                            neighbor_sol.tour_clusters.insert(pos, c);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                } else {
-                    false
-                }
-            } else {
-                // Random Replace (called swap before)
-                if neighbor_sol.tour_clusters.len() > 2 && problem.num_clusters > 1 {
-                    let pos = (rng.next_u64() as usize % (neighbor_sol.tour_clusters.len() - 2)) + 1;
-                    let c = (rng.next_u64() as usize % (problem.num_clusters - 1)) + 1;
-
-                    if !neighbor_sol.tour_clusters.contains(&c) {
-                        neighbor_sol.tour_clusters[pos] = c;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            };
-
-            if !moved {
-                continue;
+            // Periodically recompute to prevent floating point accumulation drift
+            if stats.eval_count % 100_000 == 0 {
+                current_sol.recompute(problem);
             }
 
-            neighbor_sol.update_nodes_greedy(problem);
-            neighbor_sol.recompute(problem);
+            let current_eval = evaluate_raw(
+                current_sol.total_profit,
+                current_sol.total_cost,
+                problem.t_max,
+            );
 
-            let neighbor_eval = evaluate(&neighbor_sol, problem, stats);
-            let delta = neighbor_eval - current_eval;
+            // Expanded Neighborhood Distribution (6 Moves)
+            let move_type = rng.next_u64() % 100;
 
-            let accept = if delta >= 0.0 {
-                true
-            } else {
-                let prob = f64::exp(delta / temp);
-                rng.next_f64() < prob
-            };
+            let mut delta_cost = 0.0;
+            let mut delta_profit = 0.0;
+            let mut accepted = false;
 
-            if accept {
-                current_sol = neighbor_sol;
-                current_eval = neighbor_eval;
+            let mut apply_insert = None; // (pos, node, cluster)
+            let mut apply_replace = None; // (pos, node, cluster)
+            let mut apply_drop = None; // (pos)
+            let mut apply_swap = None; // (pos1, pos2)
+            let mut apply_inversion = None; // (pos1, pos2)
+            let mut apply_node_change = None; // (pos, new_node)
 
-                // keep best feasible solution
-                if current_eval > best_eval && current_sol.total_cost <= problem.t_max {
-                    best_sol = current_sol.clone();
-                    best_eval = current_eval;
+            let n_len = current_sol.tour_nodes.len();
+
+            if move_type < 20 && problem.num_clusters > 1 {
+                // 1. INSERT (20%)
+                let c = (rng.next_u64() as usize % (problem.num_clusters - 1)) + 1;
+                if !current_sol.tour_clusters.contains(&c)
+                    && !problem.nodes_of_cluster[c].is_empty()
+                {
+                    let pos = (rng.next_u64() as usize % (n_len - 1)) + 1;
+                    let nodes = &problem.nodes_of_cluster[c];
+                    let v = nodes[rng.gen_range_usize(0, nodes.len())];
+
+                    let prev = current_sol.tour_nodes[pos - 1];
+                    let next = current_sol.tour_nodes[pos];
+
+                    delta_cost = problem.get_dist(prev, v) + problem.get_dist(v, next)
+                        - problem.get_dist(prev, next);
+                    delta_profit = problem.profits[c];
+                    apply_insert = Some((pos, v, c));
+                }
+            } else if move_type < 40 && n_len > 2 && problem.num_clusters > 1 {
+                // 2. REPLACE (20%)
+                let pos = (rng.next_u64() as usize % (n_len - 2)) + 1;
+                let new_c = (rng.next_u64() as usize % (problem.num_clusters - 1)) + 1;
+
+                if !current_sol.tour_clusters.contains(&new_c)
+                    && !problem.nodes_of_cluster[new_c].is_empty()
+                {
+                    let old_c = current_sol.tour_clusters[pos];
+                    let old_v = current_sol.tour_nodes[pos];
+                    let nodes = &problem.nodes_of_cluster[new_c];
+                    let new_v = nodes[rng.gen_range_usize(0, nodes.len())];
+
+                    let prev = current_sol.tour_nodes[pos - 1];
+                    let next = current_sol.tour_nodes[pos + 1];
+
+                    delta_cost = (problem.get_dist(prev, new_v) + problem.get_dist(new_v, next))
+                        - (problem.get_dist(prev, old_v) + problem.get_dist(old_v, next));
+                    delta_profit = problem.profits[new_c] - problem.profits[old_c];
+                    apply_replace = Some((pos, new_v, new_c));
+                }
+            } else if move_type < 50 && n_len > 3 {
+                // 3. DROP (10%)
+                let pos = (rng.next_u64() as usize % (n_len - 2)) + 1;
+                let old_c = current_sol.tour_clusters[pos];
+                let old_v = current_sol.tour_nodes[pos];
+
+                let prev = current_sol.tour_nodes[pos - 1];
+                let next = current_sol.tour_nodes[pos + 1];
+
+                delta_cost = problem.get_dist(prev, next)
+                    - (problem.get_dist(prev, old_v) + problem.get_dist(old_v, next));
+                delta_profit = -problem.profits[old_c];
+                apply_drop = Some(pos);
+            } else if move_type < 65 && n_len > 3 {
+                // 4. SWAP (15%) - From Paper
+                let mut i = (rng.next_u64() as usize % (n_len - 2)) + 1;
+                let mut j = (rng.next_u64() as usize % (n_len - 2)) + 1;
+                if i != j {
+                    if i > j {
+                        std::mem::swap(&mut i, &mut j);
+                    }
+                    let prev_i = current_sol.tour_nodes[i - 1];
+                    let n_i = current_sol.tour_nodes[i];
+                    let next_i = current_sol.tour_nodes[i + 1];
+                    let prev_j = current_sol.tour_nodes[j - 1];
+                    let n_j = current_sol.tour_nodes[j];
+                    let next_j = current_sol.tour_nodes[j + 1];
+
+                    if j == i + 1 {
+                        // Adjacent
+                        delta_cost = problem.get_dist(prev_i, n_j)
+                            + problem.get_dist(n_j, n_i)
+                            + problem.get_dist(n_i, next_j)
+                            - (problem.get_dist(prev_i, n_i)
+                                + problem.get_dist(n_i, n_j)
+                                + problem.get_dist(n_j, next_j));
+                    } else {
+                        // Non-adjacent
+                        delta_cost = problem.get_dist(prev_i, n_j)
+                            + problem.get_dist(n_j, next_i)
+                            + problem.get_dist(prev_j, n_i)
+                            + problem.get_dist(n_i, next_j)
+                            - (problem.get_dist(prev_i, n_i)
+                                + problem.get_dist(n_i, next_i)
+                                + problem.get_dist(prev_j, n_j)
+                                + problem.get_dist(n_j, next_j));
+                    }
+                    apply_swap = Some((i, j));
+                }
+            } else if move_type < 85 && n_len > 4 {
+                // 5. INVERSION / 2-OPT (20%) - From Paper
+                let i = (rng.next_u64() as usize % (n_len - 3)) + 1;
+                let j_range = n_len - 2 - i;
+                let j = i
+                    + 1
+                    + if j_range > 0 {
+                        rng.next_u64() as usize % j_range
+                    } else {
+                        0
+                    };
+
+                let prev_i = current_sol.tour_nodes[i - 1];
+                let n_i = current_sol.tour_nodes[i];
+                let n_j = current_sol.tour_nodes[j];
+                let next_j = current_sol.tour_nodes[j + 1];
+
+                // Note: Valid O(1) evaluation because euclidean distance is symmetric in our instance rules
+                delta_cost = problem.get_dist(prev_i, n_j) + problem.get_dist(n_i, next_j)
+                    - (problem.get_dist(prev_i, n_i) + problem.get_dist(n_j, next_j));
+                apply_inversion = Some((i, j));
+            } else if n_len > 2 {
+                // 6. NODE CHANGE (15%)
+                let pos = (rng.next_u64() as usize % (n_len - 2)) + 1;
+                let c = current_sol.tour_clusters[pos];
+                let nodes = &problem.nodes_of_cluster[c];
+
+                if nodes.len() > 1 {
+                    let old_v = current_sol.tour_nodes[pos];
+                    let mut new_v = nodes[rng.gen_range_usize(0, nodes.len())];
+                    if new_v == old_v {
+                        new_v = nodes[(rng.gen_range_usize(1, nodes.len())
+                            + nodes.iter().position(|&x| x == old_v).unwrap_or(0))
+                            % nodes.len()];
+                    }
+                    let prev = current_sol.tour_nodes[pos - 1];
+                    let next = current_sol.tour_nodes[pos + 1];
+
+                    delta_cost = problem.get_dist(prev, new_v) + problem.get_dist(new_v, next)
+                        - (problem.get_dist(prev, old_v) + problem.get_dist(old_v, next));
+                    apply_node_change = Some((pos, new_v));
+                }
+            }
+
+            // Apply Move Logic (Standard Metropolis-Hastings)
+            if apply_insert.is_some()
+                || apply_replace.is_some()
+                || apply_drop.is_some()
+                || apply_swap.is_some()
+                || apply_inversion.is_some()
+                || apply_node_change.is_some()
+            {
+                let neighbor_profit = current_sol.total_profit + delta_profit;
+                let neighbor_cost = current_sol.total_cost + delta_cost;
+                let neighbor_eval = evaluate_raw(neighbor_profit, neighbor_cost, problem.t_max);
+
+                let delta = neighbor_eval - current_eval;
+
+                if delta >= 0.0 {
+                    accepted = true;
+                } else {
+                    let prob = f64::exp(delta / temp);
+                    if rng.next_f64() < prob {
+                        accepted = true;
+                    }
+                }
+
+                if accepted {
+                    if let Some((pos, v, c)) = apply_insert {
+                        current_sol.tour_nodes.insert(pos, v);
+                        current_sol.tour_clusters.insert(pos, c);
+                    } else if let Some((pos, v, c)) = apply_replace {
+                        current_sol.tour_nodes[pos] = v;
+                        current_sol.tour_clusters[pos] = c;
+                    } else if let Some(pos) = apply_drop {
+                        current_sol.tour_nodes.remove(pos);
+                        current_sol.tour_clusters.remove(pos);
+                    } else if let Some((p1, p2)) = apply_swap {
+                        current_sol.tour_nodes.swap(p1, p2);
+                        current_sol.tour_clusters.swap(p1, p2);
+                    } else if let Some((p1, p2)) = apply_inversion {
+                        current_sol.tour_nodes[p1..=p2].reverse();
+                        current_sol.tour_clusters[p1..=p2].reverse();
+                    } else if let Some((pos, v)) = apply_node_change {
+                        current_sol.tour_nodes[pos] = v;
+                    }
+
+                    current_sol.total_cost = neighbor_cost;
+                    current_sol.total_profit = neighbor_profit;
+
+                    // Strictly enforce feasibility for the global Best found
+                    if neighbor_cost <= problem.t_max && neighbor_eval > best_eval {
+                        best_sol = current_sol.clone();
+                        best_eval = neighbor_eval;
+                    }
                 }
             }
         }
-
-        temp *= safe_alpha;
+        temp *= safe_alpha; // Apply cooling
     }
 
+    tour_improvement(problem, &mut best_sol);
     best_sol
 }

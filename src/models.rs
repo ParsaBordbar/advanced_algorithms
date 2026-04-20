@@ -1,11 +1,9 @@
-// In src/models.rs
-
 #[derive(Clone)]
 pub struct Problem {
     pub num_nodes: usize,
     pub num_clusters: usize,
     pub t_max: f64,
-    pub dist: Vec<f64>, 
+    pub dist: Vec<f64>,
     pub cluster_of_node: Vec<usize>,
     pub nodes_of_cluster: Vec<Vec<usize>>,
     pub profits: Vec<f64>,
@@ -43,10 +41,10 @@ impl Solution {
         for i in 1..(self.tour_clusters.len() - 1) {
             let prev_node = new_nodes[i - 1];
             let current_cluster = self.tour_clusters[i];
-            
+
             let mut best_node = 0;
             let mut min_dist = f64::MAX;
-            
+
             // Find the closest node in the current cluster to the previous node
             for &node in &pb.nodes_of_cluster[current_cluster] {
                 let dist = pb.get_dist(prev_node, node);
@@ -57,7 +55,7 @@ impl Solution {
             }
             new_nodes.push(best_node);
         }
-        
+
         new_nodes.push(0); // End at depot (node 0)
         self.tour_nodes = new_nodes;
     }

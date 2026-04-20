@@ -16,3 +16,18 @@ impl Default for Config {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct DataPath {
+    pub data_dir: String,
+    pub output_dir: String,
+}
+
+impl Default for DataPath {
+    fn default() -> Self {
+        Self {
+            data_dir: "src/data".to_string(),
+            output_dir: "/output".to_string(),
+        }
+    }
+}
