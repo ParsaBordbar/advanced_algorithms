@@ -1,7 +1,0 @@
-[package]
-name = "sop_simulated_annealing"
-version = "0.1.0"
-edition = "2024"
-default-run = "sop_simulated_annealing"
-
-[dependencies]
