@@ -1,0 +1,973 @@
+<directory_structure>
+bin/
+  benchmark.rs
+data/
+  output/
+io/
+  mod.rs
+  output.rs
+  parser.rs
+solver/
+  mod.rs
+  phase1.rs
+  phase2.rs
+.DS_Store
+configs.rs
+lib.rs
+main.rs
+models.rs
+parser.rs
+rng.rs
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="bin/benchmark.rs">
+use std::fs::{self, File};
+use std::io::Write;
+use std::time::Instant;
+
+use sop_tabu::parser::parse_instance;
+use sop_tabu::solver::phase1::phase1_construction;
+use sop_tabu::solver::phase2::tabu_search;
+
+fn main() {
+    let instances_dir = "src/instances";
+    let output_file = "benchmark_results.csv";
+    
+    let mut csv = File::create(output_file).expect("Failed to create CSV");
+    writeln!(csv, "Instance,Profit,Cost,Time_ms").unwrap();
+
+    let paths = fs::read_dir(instances_dir).expect("Failed to read directory");
+
+    for path in paths {
+        let path = path.unwrap().path();
+        if path.extension().and_then(|s| s.to_str()) == Some("sop") {
+            let filename = path.file_name().unwrap().to_str().unwrap();
+            println!("Processing {}...", filename);
+
+            let problem = parse_instance(path.to_str().unwrap());
+            
+            let start = Instant::now();
+            
+            // Phase 1
+            let initial_sol = phase1_construction(&problem);
+            
+            // Phase 2 & 3 (Adjust parameters as needed: lambda, beta, alpha, max_iter)
+            let best_sol = tabu_search(&problem, initial_sol, 1.0, 0.1, 10, 1000);
+            
+            let duration = start.elapsed().as_millis();
+
+            // Save to CSV
+            writeln!(
+                csv, 
+                "{},{},{},{}", 
+                filename, 
+                best_sol.total_profit, 
+                best_sol.total_cost, 
+                duration
+            ).unwrap();
+        }
+    }
+    
+    println!("Benchmarking complete. Results saved to {}", output_file);
+}
+</file>
+
+<file path="configs.rs">
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub t_start: f64,
+    pub t_final: f64,
+    pub alpha: f64,
+    pub epoch_length: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            t_start: 16.0,
+            t_final: 0.001,
+            alpha: 0.93,
+            epoch_length: 80_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DataPath {
+    pub data_dir: String,
+    pub output_dir: String,
+}
+
+impl Default for DataPath {
+    fn default() -> Self {
+        Self {
+            data_dir: "src/data".to_string(),
+            output_dir: "/output".to_string(),
+        }
+    }
+}
+</file>
+
+<file path="io/mod.rs">
+pub mod output;
+pub mod parser;
+</file>
+
+<file path="io/output.rs">
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::configs::DataPath;
+use crate::models::Solution;
+
+pub fn write_solution_file(instance_path: &str, sol: &Solution) -> std::io::Result<String> {
+    let DataPath {
+        data_dir,
+        output_dir,
+    } = DataPath::default();
+
+    let stem = Path::new(instance_path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let out_path = PathBuf::from(format!("{}{}/{}_output.txt", data_dir, output_dir, stem));
+    let mut f = File::create(&out_path)?;
+
+    let customers: Vec<String> = sol.tour_nodes[1..sol.tour_nodes.len() - 1]
+        .iter()
+        .map(|&n| (n + 1).to_string())
+        .collect();
+
+    writeln!(f, "{}", customers.join(" "))?;
+    writeln!(f, "Travel_Time: {}", sol.total_cost.round() as i64)?;
+    writeln!(f, "Profit: {}", sol.total_profit.round() as i64)?;
+
+    Ok(out_path.display().to_string())
+}
+</file>
+
+<file path="io/parser.rs">
+use crate::models::Problem;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
+pub fn parse_instance(file_path: &str) -> Problem {
+    let file = File::open(file_path).expect("Could not open file");
+    let reader = BufReader::new(file);
+
+    let mut num_nodes = 0;
+    let mut num_clusters = 0;
+    let mut t_max = 0.0;
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+
+    let mut reading_nodes = false;
+    let mut reading_sets = false;
+
+    let mut profits = Vec::new();
+    let mut nodes_of_cluster = Vec::new();
+    let mut cluster_of_node = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.expect("Error reading line");
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        if parts[0] == "DIMENSION:" {
+            num_nodes = parts[1].parse().unwrap();
+            cluster_of_node = vec![0; num_nodes];
+        } else if parts[0] == "SETS:" {
+            num_clusters = parts[1].parse().unwrap();
+            profits = vec![0.0; num_clusters];
+            nodes_of_cluster = vec![Vec::new(); num_clusters];
+        } else if parts[0] == "TMAX:" {
+            t_max = parts[1].parse().unwrap();
+        } else if parts[0] == "NODE_COORD_SECTION" {
+            reading_nodes = true;
+            reading_sets = false;
+        } else if parts[0] == "GTSP_SET_SECTION:" {
+            reading_nodes = false;
+            reading_sets = true;
+        } else if parts[0] == "EOF" {
+            break;
+        } else if reading_nodes {
+            let x: f64 = parts[1].parse().unwrap();
+            let y: f64 = parts[2].parse().unwrap();
+            coords.push((x, y));
+        } else if reading_sets {
+            let set_id: usize = parts[0].parse().unwrap();
+            let profit: f64 = parts[1].parse().unwrap();
+            profits[set_id] = profit;
+
+            for i in 2..parts.len() {
+                let node_id: usize = parts[i].parse().unwrap();
+                let internal_node_id = node_id - 1; // Convert 1-indexed to 0-indexed
+                nodes_of_cluster[set_id].push(internal_node_id);
+                cluster_of_node[internal_node_id] = set_id;
+            }
+        }
+    }
+
+    // Precompute 2D Euclidean rounded UP (CEIL_2D from the instance specs)
+    let mut dist = vec![0.0; num_nodes * num_nodes];
+    for i in 0..num_nodes {
+        for j in 0..num_nodes {
+            if i != j {
+                let dx = coords[i].0 - coords[j].0;
+                let dy = coords[i].1 - coords[j].1;
+                dist[i * num_nodes + j] = (dx * dx + dy * dy).sqrt().ceil();
+            }
+        }
+    }
+
+    Problem {
+        num_nodes,
+        num_clusters,
+        t_max,
+        dist,
+        cluster_of_node,
+        nodes_of_cluster,
+        profits,
+    }
+}
+</file>
+
+<file path="lib.rs">
+pub mod models;
+pub mod parser;
+pub mod rng;
+pub mod solver;
+</file>
+
+<file path="main.rs">
+use std::env;
+use std::time::Instant;
+
+use sop_tabu::parser::parse_instance;
+use sop_tabu::solver::phase2::tabu_search;
+use sop_tabu::solver::phase1::{phase1_construction};
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 4 {
+        eprintln!("Usage: {} <instance_path> <max_iter> <alpha>", args[0]);
+        std::process::exit(1);
+    }
+
+    let file_path = &args[1];
+    let max_iter: usize = args[2].parse().expect("Invalid max_iter");
+    let alpha: usize = args[3].parse().expect("Invalid alpha");
+    
+    // Hyperparameters from paper
+    let lambda = 0.5;
+    let beta = 0.05;
+
+    let start_time = Instant::now();
+
+    println!("Parsing instance: {}", file_path);
+    let pb = parse_instance(file_path);
+
+    println!("Starting Phase 1 (Constructive Heuristic)...");
+    let initial_sol = phase1_construction(&pb);
+    println!("Phase 1 Complete -> Profit: {}, Cost: {}", initial_sol.total_profit, initial_sol.total_cost);
+
+    println!("Starting Phase 2 (Tabu Search)...");
+    let best_sol = tabu_search(&pb, initial_sol, lambda, beta, alpha, max_iter);
+
+    let duration = start_time.elapsed();
+
+    println!("\n=== FINAL RESULTS ===");
+    println!("Execution Time: {:.2?}", duration);
+    println!("Best Profit: {}", best_sol.total_profit);
+    println!("Best Cost: {}", best_sol.total_cost);
+    println!("Clusters Visited: {:?}", best_sol.tour_clusters);
+}
+</file>
+
+<file path="models.rs">
+#[derive(Clone)]
+pub struct Problem {
+    pub num_nodes: usize,
+    pub num_clusters: usize,
+    pub t_max: f64,
+    pub dist: Vec<f64>, // Flattened 1D matrix for cache speed
+    pub cluster_of_node: Vec<usize>,
+    pub nodes_of_cluster: Vec<Vec<usize>>,
+    pub profits: Vec<f64>,
+}
+
+impl Problem {
+    #[inline(always)]
+    pub fn get_dist(&self, i: usize, j: usize) -> f64 {
+        self.dist[i * self.num_nodes + j]
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Solution {
+    pub tour_nodes: Vec<usize>,       
+    pub tour_clusters: Vec<usize>,    
+    pub total_profit: f64,
+    pub total_cost: f64,
+}
+
+impl Solution {
+    pub fn new() -> Self {
+        Self {
+            tour_nodes: vec![0, 0],
+            tour_clusters: vec![0, 0],
+            total_profit: 0.0,
+            total_cost: 0.0,
+        }
+    }
+
+    pub fn recompute(&mut self, pb: &Problem) {
+        self.total_cost = 0.0;
+        self.total_profit = 0.0;
+        for i in 0..(self.tour_nodes.len() - 1) {
+            self.total_cost += pb.get_dist(self.tour_nodes[i], self.tour_nodes[i + 1]);
+        }
+        for &c in self.tour_clusters.iter().take(self.tour_clusters.len() - 1) {
+            if c != 0 {
+                self.total_profit += pb.profits[c];
+            }
+        }
+    }
+}
+</file>
+
+<file path="parser.rs">
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use crate::models::Problem;
+
+pub fn parse_instance(file_path: &str) -> Problem {
+    let file = File::open(file_path).expect("Could not open file");
+    let reader = BufReader::new(file);
+
+    let mut num_nodes = 0;
+    let mut num_clusters = 0;
+    let mut t_max = 0.0;
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    
+    let mut reading_nodes = false;
+    let mut reading_sets = false;
+
+    let mut profits = Vec::new();
+    let mut nodes_of_cluster = Vec::new();
+    let mut cluster_of_node = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.expect("Error reading line");
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() { continue; }
+
+        if parts[0] == "DIMENSION:" {
+            num_nodes = parts[1].parse().unwrap();
+            cluster_of_node = vec![0; num_nodes];
+        } else if parts[0] == "SETS:" {
+            num_clusters = parts[1].parse().unwrap();
+            profits = vec![0.0; num_clusters];
+            nodes_of_cluster = vec![Vec::new(); num_clusters];
+        } else if parts[0] == "TMAX:" {
+            t_max = parts[1].parse().unwrap();
+        } else if parts[0] == "NODE_COORD_SECTION" {
+            reading_nodes = true;
+            reading_sets = false;
+        } else if parts[0] == "GTSP_SET_SECTION:" {
+            reading_nodes = false;
+            reading_sets = true;
+        } else if parts[0] == "EOF" {
+            break;
+        } else if reading_nodes {
+            let x: f64 = parts[1].parse().unwrap();
+            let y: f64 = parts[2].parse().unwrap();
+            coords.push((x, y));
+        } else if reading_sets {
+            let set_id: usize = parts[0].parse().unwrap();
+            let profit: f64 = parts[1].parse().unwrap();
+            profits[set_id] = profit;
+
+            for i in 2..parts.len() {
+                let node_id: usize = parts[i].parse().unwrap();
+                let internal_node_id = node_id - 1; // Convert 1-indexed to 0-indexed
+                nodes_of_cluster[set_id].push(internal_node_id);
+                cluster_of_node[internal_node_id] = set_id;
+            }
+        }
+    }
+
+    // Precompute 2D Euclidean rounded UP (CEIL_2D from the instance specs)
+    let mut dist = vec![0.0; num_nodes * num_nodes];
+    for i in 0..num_nodes {
+        for j in 0..num_nodes {
+            if i != j {
+                let dx = coords[i].0 - coords[j].0;
+                let dy = coords[i].1 - coords[j].1;
+                dist[i * num_nodes + j] = (dx * dx + dy * dy).sqrt().ceil();
+            }
+        }
+    }
+
+    Problem {
+        num_nodes,
+        num_clusters,
+        t_max,
+        dist,
+        cluster_of_node,
+        nodes_of_cluster,
+        profits,
+    }
+}
+</file>
+
+<file path="rng.rs">
+#![allow(dead_code)]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct EpochRng {
+    state: u64,
+}
+
+impl EpochRng {
+    pub fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX epoch")
+            .as_nanos() as u64;
+        Self { state: seed }
+    }
+
+    pub fn from_seed(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    pub fn next_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / 9007199254740992.0)
+    }
+
+    pub fn gen_range(&mut self, low: f64, high: f64) -> f64 {
+        assert!(low < high, "low must be less than high");
+        low + (high - low) * self.next_f64()
+    }
+
+    pub fn gen_range_i32(&mut self, low: i32, high: i32) -> i32 {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u32() % (high - low) as u32) as i32
+    }
+
+    pub fn gen_range_usize(&mut self, low: usize, high: usize) -> usize {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u64() as usize % (high - low))
+    }
+
+    pub fn shuffle<T>(&mut self, slice: &mut [T]) {
+        for i in (1..slice.len()).rev() {
+            let j = self.gen_range_usize(0, i + 1);
+            slice.swap(i, j);
+        }
+    }
+}
+
+impl Default for EpochRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+
+pub struct LcgRng {
+    state: u64,
+    a: u64,
+    b: u64,
+    m: u64,
+}
+
+
+impl LcgRng {
+    pub fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX epoch")
+            .as_nanos() as u64;
+        Self::from_seed(seed)
+    }
+
+    pub fn from_seed(seed: u64) -> Self {
+        Self {
+            state: seed,
+            a: 1103515245,
+            b: 12345,
+            m: 1u64 << 32,
+        }
+    }
+
+    pub fn with_params(seed: u64, a: u64, b: u64, m: u64) -> Self {
+        Self { state: seed, a, b, m }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = (self.a.wrapping_mul(self.state).wrapping_add(self.b)) % self.m;
+        self.state
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        self.next_u64() as u32
+    }
+
+    pub fn next_f64(&mut self) -> f64 {
+        self.next_u64() as f64 / self.m as f64
+    }
+
+    pub fn gen_range(&mut self, low: f64, high: f64) -> f64 {
+        assert!(low < high, "low must be less than high");
+        low + (high - low) * self.next_f64()
+    }
+
+    pub fn gen_range_i32(&mut self, low: i32, high: i32) -> i32 {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u32() % (high - low) as u32) as i32
+    }
+
+    pub fn gen_range_usize(&mut self, low: usize, high: usize) -> usize {
+        assert!(low < high, "low must be less than high");
+        low + (self.next_u64() as usize % (high - low))
+    }
+}
+
+impl Default for LcgRng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct XorShift {
+    pub state: u64,
+}
+
+impl XorShift {
+    pub fn new(seed: u64) -> Self {
+        Self { state: if seed == 0 { 1 } else { seed } }
+    }
+
+    pub fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    pub fn rand_tenure(&mut self, max_val: u64) -> usize {
+        if max_val == 0 { return 1; }
+        (1 + (self.next() % max_val)) as usize
+    }
+}
+</file>
+
+<file path="solver/mod.rs">
+pub mod phase1;
+pub mod phase2;
+</file>
+
+<file path="solver/phase1.rs">
+use crate::models::{Problem, Solution};
+
+
+pub fn phase1_construction(pb: &Problem) -> Solution {
+    let mut sol = Solution::new();
+    let mut unvisited_clusters: Vec<usize> = (1..pb.num_clusters).collect();
+    
+    // Sort clusters by descending profit
+    unvisited_clusters.sort_unstable_by(|&a, &b| pb.profits[b].partial_cmp(&pb.profits[a]).unwrap());
+
+    for &cg in &unvisited_clusters {
+        let u = sol.tour_nodes[sol.tour_nodes.len() - 2];
+        let mut best_v = None;
+        let mut min_cost_add = f64::MAX;
+
+        for &v in &pb.nodes_of_cluster[cg] {
+            let cost_add = pb.get_dist(u, v) + pb.get_dist(v, 0) - pb.get_dist(u, 0);
+            if sol.total_cost + cost_add <= pb.t_max {
+                if cost_add < min_cost_add {
+                    min_cost_add = cost_add;
+                    best_v = Some(v);
+                }
+            }
+        }
+
+        if let Some(v) = best_v {
+            sol.tour_nodes.insert(sol.tour_nodes.len() - 1, v);
+            sol.tour_clusters.insert(sol.tour_clusters.len() - 1, cg);
+            sol.total_cost += min_cost_add;
+            sol.total_profit += pb.profits[cg];
+        }
+    }
+
+    tour_improvement(pb, &mut sol);
+    sol
+}
+
+// ==========================================
+// 4. TOUR IMPROVEMENT (Step 1 & Step 2)
+// ==========================================
+
+pub fn tour_improvement(pb: &Problem, sol: &mut Solution) {
+    let mut improved = true;
+    while improved {
+        improved = false;
+        let cost_before = sol.total_cost;
+        
+        optimize_vertices_dp(pb, sol);
+        optimize_routing_2opt(pb, sol);
+
+        if sol.total_cost < cost_before - 1e-5 {
+            improved = true;
+        }
+    }
+}
+
+pub fn optimize_vertices_dp(pb: &Problem, sol: &mut Solution) {
+    let n_clusters = sol.tour_clusters.len();
+    if n_clusters <= 2 { return; }
+
+    let mut dp = vec![vec![f64::MAX; pb.num_nodes]; n_clusters];
+    let mut parent = vec![vec![0usize; pb.num_nodes]; n_clusters];
+
+    dp[0][0] = 0.0;
+
+    for i in 1..n_clusters {
+        let prev_cluster = sol.tour_clusters[i - 1];
+        let curr_cluster = sol.tour_clusters[i];
+
+        for &u in &pb.nodes_of_cluster[prev_cluster] {
+            if dp[i - 1][u] == f64::MAX { continue; }
+
+            for &v in &pb.nodes_of_cluster[curr_cluster] {
+                let cost = dp[i - 1][u] + pb.get_dist(u, v);
+                if cost < dp[i][v] {
+                    dp[i][v] = cost;
+                    parent[i][v] = u;
+                }
+            }
+        }
+    }
+
+    let mut curr_node = 0;
+    for i in (1..n_clusters).rev() {
+        sol.tour_nodes[i] = curr_node;
+        curr_node = parent[i][curr_node];
+    }
+    sol.tour_nodes[0] = 0;
+    sol.recompute(pb);
+}
+
+pub fn optimize_routing_2opt(pb: &Problem, sol: &mut Solution) {
+    let mut improved = true;
+    let n = sol.tour_nodes.len();
+    while improved {
+        improved = false;
+        for i in 1..n - 2 {
+            for j in i + 1..n - 1 {
+                let n1 = sol.tour_nodes[i - 1];
+                let n2 = sol.tour_nodes[i];
+                let n3 = sol.tour_nodes[j];
+                let n4 = sol.tour_nodes[j + 1];
+
+                let current_dist = pb.get_dist(n1, n2) + pb.get_dist(n3, n4);
+                let new_dist = pb.get_dist(n1, n3) + pb.get_dist(n2, n4);
+
+                if new_dist < current_dist - 1e-5 {
+                    sol.tour_nodes[i..=j].reverse();
+                    sol.tour_clusters[i..=j].reverse();
+                    sol.recompute(pb);
+                    improved = true;
+                }
+            }
+        }
+    }
+}
+</file>
+
+<file path="solver/phase2.rs">
+use std::collections::HashSet;
+use crate::models::{Problem, Solution};
+use crate::rng::XorShift;
+use crate::solver::phase1::tour_improvement;
+
+pub fn tabu_search(
+    pb: &Problem, 
+    mut current_sol: Solution, 
+    lambda: f64, 
+    beta: f64, 
+    alpha: usize, 
+    max_iter: usize
+) -> Solution {
+    let mut rng = XorShift::new(42);
+    let l_lambda = (pb.num_clusters as f64 * lambda).ceil() as u64;
+
+    let mut best_sol = current_sol.clone();
+    
+    let mut tabu_insert = vec![0usize; pb.num_clusters];
+    let mut tabu_remove = vec![0usize; pb.num_clusters];
+
+    let mut iter_without_improvement = 0;
+    let mut total_iters = 0;
+
+    while iter_without_improvement < max_iter {
+        total_iters += 1;
+
+        let neighbor = explore_neighborhood(pb, &current_sol, &tabu_insert, &tabu_remove, total_iters);
+
+        let mut next_sol = None;
+        let mut used_move_cluster = 0;
+        let mut is_insertion = true;
+
+        if let Some((cand_sol, cluster_changed, is_ins)) = neighbor {
+            next_sol = Some(cand_sol);
+            used_move_cluster = cluster_changed;
+            is_insertion = is_ins;
+        } else {
+            // Apply exact MASOP SoftShake/HardShake 
+            let shaken_sol = apply_shake(&current_sol, &best_sol, beta, &mut rng, pb);
+            next_sol = Some(shaken_sol);
+        }
+
+        if let Some(mut new_sol) = next_sol {
+            current_sol = new_sol.clone();
+
+            if used_move_cluster != 0 {
+                let tenure = rng.rand_tenure(l_lambda);
+                if is_insertion {
+                    tabu_remove[used_move_cluster] = total_iters + tenure;
+                } else {
+                    tabu_insert[used_move_cluster] = total_iters + tenure;
+                }
+            }
+
+            if total_iters % alpha == 0 {
+                tour_improvement(pb, &mut current_sol);
+            }
+
+            let global_better_profit = current_sol.total_profit > best_sol.total_profit + 1e-5;
+            let global_tie_breaker = (current_sol.total_profit - best_sol.total_profit).abs() < 1e-5 
+                                      && current_sol.total_cost < best_sol.total_cost;
+
+            if global_better_profit || global_tie_breaker {
+                tour_improvement(pb, &mut current_sol);
+                best_sol = current_sol.clone();
+                iter_without_improvement = 0;
+            } else {
+                iter_without_improvement += 1;
+            }
+        } else {
+            iter_without_improvement += 1;
+        }
+    }
+    best_sol
+}
+
+/// Diversification phase: SoftShake (5-15%) and HardShake (30-40%)
+fn apply_shake(
+    current: &Solution, 
+    best: &Solution, 
+    beta: f64, 
+    rng: &mut XorShift, 
+    pb: &Problem
+) -> Solution {
+    let mut shaken_sol = current.clone();
+    let len = shaken_sol.tour_clusters.len();
+    
+    // n_visited excludes start and end depots
+    let n_visited = len.saturating_sub(2);
+    if n_visited <= 1 {
+        return shaken_sol;
+    }
+
+    // β = 8% margin for Soft vs Hard Shake
+    let threshold = best.total_profit - (beta * best.total_profit);
+    
+    let (min_pct, max_pct) = if current.total_profit >= threshold {
+        (0.05, 0.15) // SoftShake: Current is close to best known
+    } else {
+        (0.30, 0.40) // HardShake: Stuck in bad region, heavy destruction needed
+    };
+
+    let mut min_k = (n_visited as f64 * min_pct).ceil() as usize;
+    let mut max_k = (n_visited as f64 * max_pct).ceil() as usize;
+    
+    if min_k == 0 { min_k = 1; }
+    if max_k > n_visited { max_k = n_visited; }
+    if min_k > max_k { min_k = max_k; }
+
+    let k = if min_k < max_k {
+        min_k + (rng.next() as usize % (max_k - min_k + 1))
+    } else {
+        min_k
+    };
+
+    // Partial Fisher-Yates Shuffle for selecting k distinct clusters
+    let mut indices: Vec<usize> = (1..len - 1).collect();
+    for i in 0..k {
+        let swap_idx = i + (rng.next() as usize % (indices.len() - i));
+        indices.swap(i, swap_idx);
+    }
+
+    // Mark nodes to be dropped
+    let mut keep = vec![true; len];
+    for i in 0..k {
+        keep[indices[i]] = false;
+    }
+
+    // Fast O(N) In-Place Retain (Replaces slow shifting .remove() calls)
+    let mut idx = 0;
+    shaken_sol.tour_clusters.retain(|_| {
+        let keep_it = keep[idx];
+        idx += 1;
+        keep_it
+    });
+    
+    let mut idx2 = 0;
+    shaken_sol.tour_nodes.retain(|_| {
+        let keep_it = keep[idx2];
+        idx2 += 1;
+        keep_it
+    });
+
+    shaken_sol.recompute(pb);
+    shaken_sol
+}
+
+pub fn explore_neighborhood(
+    pb: &Problem,
+    current: &Solution,
+    tabu_insert: &[usize],
+    tabu_remove: &[usize],
+    current_iter: usize,
+) -> Option<(Solution, usize, bool)> {
+    
+    let mut best_neighbor: Option<Solution> = None;
+    let mut best_move_cluster = 0;
+    let mut best_is_insertion = true;
+
+    let visited_set: HashSet<usize> = current.tour_clusters.iter().cloned().collect();
+    
+    let evaluate = |cand: &Solution, best: &Option<Solution>| -> bool {
+        if let Some(b) = best {
+            if cand.total_profit > b.total_profit + 1e-5 { return true; }
+            if (cand.total_profit - b.total_profit).abs() < 1e-5 && cand.total_cost < b.total_cost { return true; }
+            return false;
+        }
+        true
+    };
+
+    // 1. Evaluate Insert Moves
+    for cg in 1..pb.num_clusters {
+        if visited_set.contains(&cg) { continue; }
+        let is_tabu = tabu_insert[cg] > current_iter;
+
+        for pos in 1..current.tour_nodes.len() {
+            let u = current.tour_nodes[pos - 1];
+            let w = current.tour_nodes[pos];
+
+            let mut best_v = 0;
+            let mut min_delta = f64::MAX;
+
+            for &v in &pb.nodes_of_cluster[cg] {
+                let delta = pb.get_dist(u, v) + pb.get_dist(v, w) - pb.get_dist(u, w);
+                if delta < min_delta {
+                    min_delta = delta;
+                    best_v = v;
+                }
+            }
+
+            if current.total_cost + min_delta <= pb.t_max {
+                let mut cand = current.clone();
+                cand.tour_nodes.insert(pos, best_v);
+                cand.tour_clusters.insert(pos, cg);
+                cand.total_cost += min_delta;
+                cand.total_profit += pb.profits[cg];
+
+                if !is_tabu {
+                    if evaluate(&cand, &best_neighbor) {
+                        best_neighbor = Some(cand);
+                        best_move_cluster = cg;
+                        best_is_insertion = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Evaluate Swap Moves
+    for cg in 1..pb.num_clusters {
+        if visited_set.contains(&cg) { continue; }
+
+        for pos_out in 1..(current.tour_nodes.len() - 1) {
+            let ch = current.tour_clusters[pos_out];
+            let is_tabu = tabu_insert[cg] > current_iter || tabu_remove[ch] > current_iter;
+            
+            let mut inter_sol = current.clone();
+            let u_rem = inter_sol.tour_nodes[pos_out - 1];
+            let w_rem = inter_sol.tour_nodes[pos_out + 1];
+            let v_rem = inter_sol.tour_nodes[pos_out];
+            
+            inter_sol.total_cost -= pb.get_dist(u_rem, v_rem) + pb.get_dist(v_rem, w_rem) - pb.get_dist(u_rem, w_rem);
+            inter_sol.total_profit -= pb.profits[ch];
+            inter_sol.tour_nodes.remove(pos_out);
+            inter_sol.tour_clusters.remove(pos_out);
+
+            for pos_in in 1..inter_sol.tour_nodes.len() {
+                let u = inter_sol.tour_nodes[pos_in - 1];
+                let w = inter_sol.tour_nodes[pos_in];
+
+                let mut best_v = 0;
+                let mut min_delta = f64::MAX;
+
+                for &v in &pb.nodes_of_cluster[cg] {
+                    let delta = pb.get_dist(u, v) + pb.get_dist(v, w) - pb.get_dist(u, w);
+                    if delta < min_delta {
+                        min_delta = delta;
+                        best_v = v;
+                    }
+                }
+
+                if inter_sol.total_cost + min_delta <= pb.t_max {
+                    let mut cand = inter_sol.clone();
+                    cand.tour_nodes.insert(pos_in, best_v);
+                    cand.tour_clusters.insert(pos_in, cg);
+                    cand.total_cost += min_delta;
+                    cand.total_profit += pb.profits[cg];
+
+                    if !is_tabu {
+                        if evaluate(&cand, &best_neighbor) {
+                            best_neighbor = Some(cand);
+                            best_move_cluster = cg; 
+                            best_is_insertion = true; 
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best_neighbor.map(|sol| (sol, best_move_cluster, best_is_insertion))
+}
+</file>
+
+</files>
