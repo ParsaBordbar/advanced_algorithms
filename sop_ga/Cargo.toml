@@ -1,0 +1,15 @@
+[package]
+name = "sop_ga"
+version = "0.1.0"
+edition = "2021"
+default-run = "sop_ga"
+
+[[bin]]
+name = "sop_ga"
+path = "src/main.rs"
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
+[dependencies]
